@@ -1,3 +1,12 @@
+# Build the React + Radix Themes frontend locally into static assets.
+FROM node:22-bookworm-slim AS frontend
+WORKDIR /web
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY vite.config.js ./
+COPY frontend/ ./frontend/
+RUN npm run build
+
 # Stage 1: Build pure Go binary
 FROM golang:1.24-bookworm AS builder
 
@@ -29,7 +38,7 @@ WORKDIR /app
 COPY --from=builder /app/printer-web /app/printer-web
 
 # Copy static frontend assets
-COPY static/ /app/static/
+COPY --from=frontend /web/dist/ /app/static/
 
 COPY config.example.yaml /app/config.yaml
 

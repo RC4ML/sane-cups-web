@@ -4,15 +4,11 @@ import (
 	"bytes"
 	"compress/zlib"
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -31,7 +27,6 @@ import (
 const (
 	ScansDirName  = "scans"
 	StaticDirName = "static"
-	CookieName    = "auth_session"
 )
 
 type SaneDevice struct {
@@ -87,9 +82,6 @@ var (
 	cachedDefaultDev string
 	lastDiscoverTime time.Time
 	discoverMutex    sync.Mutex
-
-	activeSessions = make(map[string]time.Time)
-	sessionMutex   sync.RWMutex
 )
 
 func debugf(format string, args ...any) {
@@ -120,11 +112,6 @@ func main() {
 	}
 	mux := http.NewServeMux()
 
-	// Authentication Endpoints
-	mux.HandleFunc("/api/auth/status", handleAuthStatus)
-	mux.HandleFunc("/api/login", handleLogin)
-	mux.HandleFunc("/api/logout", handleLogout)
-
 	// REST API Endpoints
 	mux.HandleFunc("/api/status", handleStatus)
 	mux.HandleFunc("/api/devices", handleDevices)
@@ -143,8 +130,8 @@ func main() {
 	fileServer := http.FileServer(http.Dir(staticDir))
 	mux.Handle("/", staticCacheMiddleware(fileServer))
 
-	// Security, Auth & Logging
-	handler := securityMiddleware(loggingMiddleware(authMiddleware(mux)))
+	// Authentication is enforced by the deployment proxy.
+	handler := securityMiddleware(loggingMiddleware(mux))
 
 	startBackgroundCleaner()
 
@@ -154,11 +141,7 @@ func main() {
 	log.Printf("🖨️  Printing enabled: %v (ENABLE_PRINTING)", isPrintingEnabled())
 	log.Printf("📠 Scanning enabled: %v (ENABLE_SCANNING)", isScanningEnabled())
 	log.Printf("🐛 Debug logging: %v", appConfig.Debug)
-	if isAuthRequired() {
-		log.Printf("🔒 Web UI & API Authentication enabled (User: %s)", getAuthUsername())
-	} else {
-		log.Printf("🔓 Authentication disabled (Open network access)")
-	}
+	log.Printf("Authentication is delegated to the deployment proxy")
 
 	srv := &http.Server{
 		Addr:         addr,
@@ -184,14 +167,6 @@ func main() {
 		log.Printf("Server shutdown error: %v", err)
 	}
 	log.Println("Server stopped cleanly.")
-}
-
-func getAuthUsername() string {
-	return appConfig.Authentication.Username
-}
-
-func getAuthPassword() string {
-	return appConfig.Authentication.Password
 }
 
 func isPrintingEnabled() bool {
@@ -223,191 +198,13 @@ func getDefaultScanFormat() string {
 	return "pdf"
 }
 
-func isAuthRequired() bool {
-	return appConfig.Authentication.Enabled
-}
-
-func isValidSession(token string) bool {
-	if token == "" {
-		return false
-	}
-	sessionMutex.RLock()
-	expiry, exists := activeSessions[token]
-	sessionMutex.RUnlock()
-
-	if !exists {
-		return false
-	}
-	if time.Now().After(expiry) {
-		sessionMutex.Lock()
-		delete(activeSessions, token)
-		sessionMutex.Unlock()
-		return false
-	}
-	return true
-}
-
-func createSession() (string, error) {
-	bytes := make([]byte, 24)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	token := hex.EncodeToString(bytes)
-	sessionMutex.Lock()
-	activeSessions[token] = time.Now().Add(appConfig.Authentication.SessionLifetime)
-	sessionMutex.Unlock()
-	return token, nil
-}
-
-// GET /api/auth/status
-func handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	if !isAuthRequired() {
-		jsonResponse(w, http.StatusOK, map[string]any{
-			"auth_required": false,
-			"logged_in":     true,
-			"user":          "guest",
-		})
-		return
-	}
-
-	cookie, err := r.Cookie(CookieName)
-	loggedIn := err == nil && isValidSession(cookie.Value)
-
-	jsonResponse(w, http.StatusOK, map[string]any{
-		"auth_required": true,
-		"logged_in":     loggedIn,
-		"user":          getAuthUsername(),
-	})
-}
-
-// POST /api/login
-func handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-
-	if !isAuthRequired() {
-		jsonResponse(w, http.StatusOK, map[string]any{"success": true, "user": "guest"})
-		return
-	}
-
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, http.StatusBadRequest, "Invalid JSON payload")
-		return
-	}
-
-	expectedUser := getAuthUsername()
-	expectedPass := getAuthPassword()
-
-	userMatch := subtle.ConstantTimeCompare([]byte(req.Username), []byte(expectedUser)) == 1
-	passMatch := subtle.ConstantTimeCompare([]byte(req.Password), []byte(expectedPass)) == 1
-
-	if !userMatch || !passMatch {
-		jsonError(w, http.StatusUnauthorized, "Invalid username or password")
-		return
-	}
-
-	token, err := createSession()
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "Failed to create session")
-		return
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     CookieName,
-		Value:    token,
-		Path:     "/",
-		MaxAge:   int(appConfig.Authentication.SessionLifetime.Seconds()),
-		HttpOnly: true,
-		Secure:   appConfig.Authentication.SecureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
-
-	jsonResponse(w, http.StatusOK, map[string]any{
-		"success": true,
-		"user":    expectedUser,
-	})
-}
-
-// POST /api/logout
-func handleLogout(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(CookieName)
-	if err == nil && cookie.Value != "" {
-		sessionMutex.Lock()
-		delete(activeSessions, cookie.Value)
-		sessionMutex.Unlock()
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     CookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   appConfig.Authentication.SecureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
-
-	jsonResponse(w, http.StatusOK, map[string]any{"success": true})
-}
-
-// Optional Authentication Middleware
-func authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthRequired() {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Allow public static assets and auth check/login endpoints
-		path := r.URL.Path
-		if path == "/api/login" || path == "/api/logout" || path == "/api/auth/status" ||
-			path == "/styles.css" || path == "/app.js" || path == "/favicon.ico" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Check session cookie
-		if cookie, err := r.Cookie(CookieName); err == nil && isValidSession(cookie.Value) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Also check HTTP Basic Auth for automated API/curl clients
-		user, pass, ok := r.BasicAuth()
-		if ok {
-			expectedUser := getAuthUsername()
-			expectedPass := getAuthPassword()
-			if subtle.ConstantTimeCompare([]byte(user), []byte(expectedUser)) == 1 &&
-				subtle.ConstantTimeCompare([]byte(pass), []byte(expectedPass)) == 1 {
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-
-		// If accessing API endpoints without auth, return 401 JSON
-		if strings.HasPrefix(path, "/api/") {
-			jsonError(w, http.StatusUnauthorized, "Authentication required")
-			return
-		}
-
-		// For root HTML page, allow request so the frontend JS renders the clean login UI!
-		next.ServeHTTP(w, r)
-	})
-}
-
 // Security Middleware
 func securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; connect-src 'self';")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self';")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -486,7 +283,7 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	debugf("devices count=%d default=%q", len(appConfig.Devices), appConfig.Defaults.Device)
-	jsonResponse(w, http.StatusOK, map[string]any{"devices": appConfig.Devices, "default_device": appConfig.Defaults.Device})
+	jsonResponse(w, http.StatusOK, map[string]any{"devices": appConfig.Devices, "default_device": appConfig.Defaults.Device, "scan_defaults": appConfig.Defaults.Scan})
 }
 
 // Dynamic Discovery of Default CUPS Printer
@@ -1147,24 +944,14 @@ func convertImagesToPDFInPureGo(imageDatas [][]byte, dpi int, outputPath string)
 	return os.WriteFile(outputPath, fullPDF.Bytes(), 0644)
 }
 
-// Background cleanup worker for abandoned temp sessions & expired auth sessions
+// Background cleanup worker for abandoned multi-page scan sessions
 func startBackgroundCleaner() {
 	go func() {
 		ticker := time.NewTicker(30 * time.Minute)
 		defer ticker.Stop()
 
 		for range ticker.C {
-			// 1. Clean expired auth sessions
-			sessionMutex.Lock()
-			now := time.Now()
-			for token, expiry := range activeSessions {
-				if now.After(expiry) {
-					delete(activeSessions, token)
-				}
-			}
-			sessionMutex.Unlock()
-
-			// 2. Clean abandoned temporary multi-page scan sessions older than 2 hours
+			// Clean temporary multi-page sessions older than 2 hours.
 			entries, err := os.ReadDir(sessionsDir)
 			if err == nil {
 				for _, entry := range entries {
@@ -1309,10 +1096,17 @@ func handlePrintersList(w http.ResponseWriter, r *http.Request) {
 	}
 	defaultPrinter := d.Print.Queue
 
-	cmdStat := exec.Command("lpstat", "-p", "-d")
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	statArgs, jobArgs := []string{"-p"}, []string{"-o"}
+	if defaultPrinter != "" {
+		statArgs = append(statArgs, defaultPrinter)
+		jobArgs = append(jobArgs, defaultPrinter)
+	}
+	cmdStat := exec.CommandContext(ctx, "lpstat", statArgs...)
 	outStat, _ := cmdStat.CombinedOutput()
 
-	cmdJobs := exec.Command("lpstat", "-o")
+	cmdJobs := exec.CommandContext(ctx, "lpstat", jobArgs...)
 	outJobs, _ := cmdJobs.CombinedOutput()
 
 	var jobsList []string
@@ -1324,139 +1118,20 @@ func handlePrintersList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	caps, capsErr := loadPaperCapabilities(ctx, defaultPrinter)
+	paperError := ""
+	if capsErr != nil {
+		log.Printf("Paper sizes for %s: %v", defaultPrinter, capsErr)
+		paperError = "Paper sizes unavailable. Refresh to try again, or use the printer default."
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"enabled":         true,
-		"default_printer": defaultPrinter,
-		"status_text":     string(outStat),
-		"jobs":            jobsList,
-	})
-}
-
-// POST /api/print
-func handlePrintJob(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-
-	if !isPrintingEnabled() {
-		jsonError(w, http.StatusForbidden, "Printing functionality is disabled by server configuration (ENABLE_PRINTING=false)")
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, appConfig.Server.RequestLimitBytes)
-
-	contentType := r.Header.Get("Content-Type")
-
-	var targetFilePath string
-	var cleanupTemp bool
-	var copies = 1
-	var deviceID string
-	var pageRanges string
-
-	if strings.Contains(contentType, "multipart/form-data") {
-		if err := r.ParseMultipartForm(25 << 20); err != nil {
-			jsonError(w, http.StatusBadRequest, "File too large or invalid form data")
-			return
-		}
-
-		file, header, err := r.FormFile("file")
-		if err != nil {
-			jsonError(w, http.StatusBadRequest, "No file provided in form")
-			return
-		}
-		defer file.Close()
-
-		if copiesStr := r.FormValue("copies"); copiesStr != "" {
-			if c, err := strconv.Atoi(copiesStr); err == nil && c >= 1 && c <= 20 {
-				copies = c
-			}
-		}
-		deviceID = r.FormValue("device_id")
-		pageRanges = r.FormValue("page_ranges")
-
-		ext := strings.ToLower(filepath.Ext(header.Filename))
-		tempFile, err := os.CreateTemp("", "print_upload_*"+ext)
-		if err != nil {
-			jsonError(w, http.StatusInternalServerError, "Failed to create temporary print file")
-			return
-		}
-		defer tempFile.Close()
-
-		if _, err := io.Copy(tempFile, file); err != nil {
-			_ = os.Remove(tempFile.Name())
-			jsonError(w, http.StatusInternalServerError, "Failed to save print file")
-			return
-		}
-
-		targetFilePath = tempFile.Name()
-		cleanupTemp = true
-
-	} else {
-		var req struct {
-			ScanFilename string `json:"scan_filename"`
-			Copies       int    `json:"copies"`
-			DeviceID     string `json:"device_id"`
-			PageRanges   string `json:"page_ranges"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, http.StatusBadRequest, "Invalid JSON payload")
-			return
-		}
-
-		safeName := filepath.Base(req.ScanFilename)
-		targetFilePath = filepath.Join(scansDir, safeName)
-		if _, err := os.Stat(targetFilePath); os.IsNotExist(err) {
-			jsonError(w, http.StatusNotFound, "Scan file not found")
-			return
-		}
-
-		if req.Copies >= 1 && req.Copies <= 20 {
-			copies = req.Copies
-		}
-		deviceID = req.DeviceID
-		pageRanges = req.PageRanges
-	}
-
-	pageRanges, err := normalizePageRanges(pageRanges)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	if cleanupTemp {
-		defer os.Remove(targetFilePath)
-	}
-
-	d, err := configuredDevice(deviceID)
-	if err != nil || d.Print == nil {
-		jsonError(w, http.StatusBadRequest, "Selected device does not support printing")
-		return
-	}
-	printer := d.Print.Queue
-
-	args := []string{
-		"-n", strconv.Itoa(copies),
-		targetFilePath,
-	}
-	if printer != "" {
-		args = append([]string{"-d", printer}, args...)
-	}
-	if pageRanges != "" {
-		args = append([]string{"-P", pageRanges}, args...)
-	}
-
-	cmd := exec.Command("lp", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("Print error: %v, output: %s", err, string(output))
-		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("Print job failed: %s", strings.TrimSpace(string(output))))
-		return
-	}
-
-	jsonResponse(w, http.StatusOK, map[string]any{
-		"success": true,
-		"message": strings.TrimSpace(string(output)),
+		"enabled":            true,
+		"default_printer":    defaultPrinter,
+		"status_text":        string(outStat),
+		"jobs":               jobsList,
+		"paper_sizes":        caps.Sizes,
+		"default_paper_size": caps.Default,
+		"paper_sizes_error":  paperError,
 	})
 }
 

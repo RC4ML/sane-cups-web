@@ -6,13 +6,6 @@ server:
   static_directory: /app/static
   request_limit: 500MiB
 
-authentication:
-  enabled: false
-  username: admin
-  password: ""
-  session_lifetime: 168h
-  secure_cookie: false
-
 defaults:
   device: example-mfp
   scan:
@@ -23,6 +16,7 @@ defaults:
 devices:
   - id: example-mfp
     name: Example multifunction printer
+    alias: Office printer # Optional display name; ID and CUPS queue remain unchanged.
     scan:
       driver: escl
       endpoint: https://192.0.2.10/eSCL

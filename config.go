@@ -5,17 +5,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Debug          bool         `yaml:"debug"`
-	Server         ServerConfig `yaml:"server"`
-	Authentication AuthConfig   `yaml:"authentication"`
-	Defaults       Defaults     `yaml:"defaults"`
-	Devices        []Device     `yaml:"devices"`
+	Debug    bool         `yaml:"debug"`
+	Server   ServerConfig `yaml:"server"`
+	Defaults Defaults     `yaml:"defaults"`
+	Devices  []Device     `yaml:"devices"`
 }
 type ServerConfig struct {
 	Address           string `yaml:"address"`
@@ -24,24 +22,17 @@ type ServerConfig struct {
 	RequestLimit      string `yaml:"request_limit"`
 	RequestLimitBytes int64  `yaml:"-"`
 }
-type AuthConfig struct {
-	Enabled             bool          `yaml:"enabled"`
-	Username            string        `yaml:"username"`
-	Password            string        `yaml:"password"`
-	SessionLifetime     time.Duration `yaml:"-"`
-	SessionLifetimeText string        `yaml:"session_lifetime"`
-	SecureCookie        bool          `yaml:"secure_cookie"`
-}
 type Defaults struct {
 	Device string       `yaml:"device"`
 	Scan   ScanDefaults `yaml:"scan"`
 }
 type ScanDefaults struct {
-	DPI    int    `yaml:"dpi"`
-	Mode   string `yaml:"mode"`
-	Format string `yaml:"format"`
+	DPI    int    `yaml:"dpi" json:"dpi"`
+	Mode   string `yaml:"mode" json:"mode"`
+	Format string `yaml:"format" json:"format"`
 }
 type Device struct {
+	Alias string       `yaml:"alias,omitempty" json:"alias,omitempty"`
 	ID    string       `yaml:"id" json:"id"`
 	Name  string       `yaml:"name" json:"name"`
 	Scan  *ScanConfig  `yaml:"scan,omitempty" json:"scan,omitempty"`
@@ -104,11 +95,6 @@ func loadConfig(path string) error {
 	}
 	if appConfig.Defaults.Scan.Format == "" {
 		appConfig.Defaults.Scan.Format = "pdf"
-	}
-	if appConfig.Authentication.SessionLifetimeText == "" {
-		appConfig.Authentication.SessionLifetime = 7 * 24 * time.Hour
-	} else if appConfig.Authentication.SessionLifetime, err = time.ParseDuration(appConfig.Authentication.SessionLifetimeText); err != nil {
-		return fmt.Errorf("authentication.session_lifetime: %w", err)
 	}
 	seen := map[string]bool{}
 	for i := range appConfig.Devices {

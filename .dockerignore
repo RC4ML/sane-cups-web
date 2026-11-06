@@ -5,3 +5,6 @@ scans/
 *.jpg
 *.pdf
 .git
+
+node_modules/
+dist/
