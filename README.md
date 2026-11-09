@@ -18,28 +18,36 @@ A lightweight, self-hosted web interface and REST API for network and local flat
 
 ## 🚀 Quick Start (Docker Compose)
 
-### 1. `docker-compose.yaml`
+The included Compose file runs the Web app and a separate CUPS server. CUPS,
+PDF filters, Ghostscript and Chinese fonts are packaged together; no host CUPS
+installation or socket mount is needed. Queue definitions and pending jobs
+persist in Docker volumes.
 
-```yaml
-services:
-  printer:
-    build: .
-    container_name: printer-web-hub
-    restart: unless-stopped
-    network_mode: host
-    volumes:
-      - ./scans:/app/scans
-      - /var/run/cups/cups.sock:/var/run/cups/cups.sock:ro
-      - ./config.yaml:/app/config.yaml:ro
-```
+### 1. Configure the device
 
-### 2. Start the Service
+Copy `config.example.yaml` to `config.yaml`. Set the scanner's eSCL endpoint and
+the CUPS queue name; the example uses `Example_Printer`.
+
+### 2. Start the services and create the queue
 
 ```bash
 docker compose up -d --build
+docker compose exec cups cups-add-printer Example_Printer ipps://192.0.2.10:631/ipp/print
 ```
 
-Access the web interface at **`http://localhost:8085`** (or your server's IP address).
+Replace the example IP with your printer's address. Queue setup queries the
+printer's capabilities and sets A4 as the default. Run it once per printer;
+restarts preserve existing queues and do not re-enable paused printers.
+
+Access the web interface at **`http://localhost:8085`**. The example binds only
+to loopback. For shared access, put the Web service behind an authenticated
+reverse proxy. CUPS has no published host port and must remain on the dedicated
+`printing` network with trusted application clients.
+
+Published images are `ghcr.io/rc4ml/sane-cups-web` and
+`ghcr.io/rc4ml/sane-cups-web-cups`, with matching `sha-…` and release tags.
+Set `IMAGE_TAG` to pin a deployment. See [CUPS operation and migration](docs/cups.md)
+for image-only deployment, backup, host migration and validation commands.
 
 ---
 
@@ -113,12 +121,13 @@ Network CUPS uses system certificate verification; `CUPS_ENCRYPTION=Required` or
 `Always` selects HTTPS. A local/shared Unix socket needs no additional TLS setup.
 
 A4 paper loaded in a printer does not override a CUPS queue configured for Letter.
-Set the queue default with `lpadmin -p QUEUE -o media-default=iso_a4_210x297mm`
-when A4 is the intended default. Previously submitted jobs retain their original
-media requirement. For a PPD-backed queue, also set `lpadmin -p QUEUE -o PageSize=A4`
-and verify that IPP `media-default` agrees with the queue option; the PPD can retain
-an older Letter default. Paper selection describes the requested sheet, not the PDF page
-size; `Fit to paper` scales content into the printable area.
+The bundled `cups-add-printer` helper sets `PageSize=A4` after generating the
+driver, allowing CUPS to derive the matching IPP `media-default`. This avoids
+stale or duplicate defaults in CUPS 2.4.10. When changing a queue manually,
+verify both the PPD default and the IPP default reported by the application.
+Previously submitted jobs retain their original media requirement. Paper
+selection describes the requested sheet, not the PDF page size; `Fit to paper`
+scales content into the printable area.
 
 The application uses CUPS `media`, `print-scaling`, `page-set`, `outputorder`, `Collate`, and page ranges.
 These options require a CUPS queue with appropriate document filters; raw queues

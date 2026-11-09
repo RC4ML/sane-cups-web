@@ -1,0 +1,6 @@
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cups-ipp-utils avahi-daemon dbus \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=755 tests/cups/virtual-printer.sh /usr/local/bin/virtual-printer
+ENTRYPOINT ["virtual-printer"]

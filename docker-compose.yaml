@@ -1,10 +1,38 @@
 services:
   printer:
+    image: ghcr.io/rc4ml/sane-cups-web:${IMAGE_TAG:-latest}
     build: .
-    container_name: printer-web-hub
     restart: unless-stopped
-    network_mode: host
+    environment:
+      CUPS_SERVER: cups:631
+    depends_on:
+      cups:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8085:8085"
+    networks:
+      - default
+      - printing
     volumes:
       - ./scans:/app/scans
-      - /var/run/cups/cups.sock:/var/run/cups/cups.sock:ro
       - ./config.yaml:/app/config.yaml:ro
+
+  cups:
+    image: ghcr.io/rc4ml/sane-cups-web-cups:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/cups/Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      - printing
+    volumes:
+      - cups-state:/var/lib/cups
+      - cups-spool:/var/spool/cups
+
+networks:
+  printing:
+
+volumes:
+  cups-state:
+  cups-spool:

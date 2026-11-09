@@ -1,4 +1,4 @@
-name: Build and Publish Docker Image
+name: Test and Publish Web and CUPS Images
 
 on:
   push:
@@ -38,8 +38,18 @@ jobs:
 
   build:
     needs: test
-    name: Build & Push Docker Image
+    name: Build & Push ${{ matrix.component }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: web
+            dockerfile: Dockerfile
+            suffix: ''
+          - component: cups
+            dockerfile: docker/cups/Dockerfile
+            suffix: '-cups'
     permissions:
       contents: read
       packages: write
@@ -52,9 +62,6 @@ jobs:
         id: image
         shell: bash
         run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -71,7 +78,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
+          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}${{ matrix.suffix }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -79,13 +86,30 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
 
+      - name: Build CUPS test image
+        if: matrix.component == 'cups'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          tags: sane-cups-web-cups:test
+          cache-from: type=gha,scope=cups
+          cache-to: type=gha,scope=cups,mode=max
+
+      - name: Test fonts, filtering, remote jobs and persistent queues
+        if: matrix.component == 'cups'
+        run: bash tests/cups/smoke.sh sane-cups-web-cups:test
+
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,scope=${{ matrix.component }},mode=max

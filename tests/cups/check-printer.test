@@ -1,0 +1,11 @@
+{
+  NAME "A4 is the IPP default exposed to the application"
+  OPERATION Get-Printer-Attributes
+  GROUP operation-attributes-tag
+  ATTR charset attributes-charset utf-8
+  ATTR language attributes-natural-language en
+  ATTR uri printer-uri $uri
+  ATTR keyword requested-attributes media-default
+  STATUS successful-ok
+  EXPECT media-default OF-TYPE keyword WITH-VALUE iso_a4_210x297mm
+}
